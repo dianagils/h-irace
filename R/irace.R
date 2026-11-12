@@ -375,14 +375,14 @@ irace.init <- function(scenario)
   scenario
 }
 
-generateInstancesForOneSubset <- function(scenario, n, subset_instances, subset_num) {
+generateInstancesForOneSubset <- function(scenario, n, subset_instances, instancesList) {
+    # Like generateInstances(), append new instance + seed pairs so that the rows
+    # already used by past experiments keep pointing to the same pair. With
+    # deterministic instances, every instance is already in the list.
+    if (scenario$deterministic) return(instancesList)
     # Number of times that we need to repeat the set of instances given by the user.
-    ntimes <- if (scenario$deterministic) 1L else
-      # "Upper bound"" of instances needed
-      # FIXME: We could bound it even further if maxExperiments >> nInstances
-      ceiling(n / nrow(subset_instances))
-
-    subset_instances <- subset(instance_data, SubsetNumber == subset_num)
+    # FIXME: We could bound it even further if maxExperiments >> nInstances
+    ntimes <- ceiling(n / nrow(subset_instances))
 
     # Repeat each instance according to the specified number of times
     repeated_instances <- rep(subset_instances$UniqueID, each = ntimes)
@@ -401,11 +401,12 @@ generateInstancesForOneSubset <- function(scenario, n, subset_instances, subset_
 
     # Shuffle the rows randomly
     subset_instance_seeds <- subset_instance_seeds[sample(nrow(subset_instance_seeds)), ]
+    instancesList <- rbind(instancesList, subset_instance_seeds)
+    rownames(instancesList) <- NULL
+    instancesList
 }
 
 generateInstancesPerSubset <- function(scenario, n, instance_data = NULL) {
-  # If we are adding and the scenario is deterministic, we have already added all instances.
-  if (!is.null(instance_data) && scenario$deterministic) return(instance_data)
 
   # Sample seeds.
   # 2147483647 is the maximum value for a 32-bit signed integer.
@@ -1121,8 +1122,8 @@ irace_run <- function(scenario, parameters)
 
   doneSubsets <- data.frame()
   unique_subset_numbers <- unique(subsets$SubsetNumber)
-  iraceResults$experiments <- vector("list", length(unique_subset_numbers))
-  iraceResults$experiments <- lapply(iraceResults$experiments, function(x) matrix(nrow = 0, ncol = 0))
+  iraceResults$experiments <- lapply(setNames(nm = as.character(unique_subset_numbers)),
+                                     function(x) matrix(nrow = 0, ncol = 0))
 
   repeat {
     # Recovery info 
@@ -1170,7 +1171,7 @@ irace_run <- function(scenario, parameters)
       # Extract the subset rows
       currentSubset <- subsets[current_indices, ]
       if (scenario$elitist) {
-        irace.assert(sum(!is.na(iraceResults$experiments[[subsetNumber]])) == currentSubset$experimentsUsedSoFar)
+        irace.assert(sum(!is.na(iraceResults$experiments[[as.character(subsetNumber)]])) == currentSubset$experimentsUsedSoFar)
       }
       # Check the conditions
       if (any(currentSubset$remainingBudget <= 0) || (scenario$maxTime > 0 && any(currentSubset$timeUsed >= scenario$maxTime))) {
@@ -1401,8 +1402,7 @@ irace_run <- function(scenario, parameters)
             newly_generated_configs <- rbind(newly_generated_configs, new_configs_subset[i, ])
           } else {
             # If an identical configuration is found, append the current subset number to its isAliveInSubset list
-            existing_subset <- newly_generated_configs$isAliveInSubset[identical_index]
-            newly_generated_configs$isAliveInSubset[identical_index] <- c(newly_generated_configs$isAliveInSubset[identical_index],existing_subset)
+            newly_generated_configs$isAliveInSubset[[identical_index[1]]] <- union(newly_generated_configs$isAliveInSubset[[identical_index[1]]], subset_number)
             }
           }
         }
@@ -1456,8 +1456,7 @@ irace_run <- function(scenario, parameters)
               newly_generated_configs <- rbind(newly_generated_configs, new_configs_subset[i, ])
             } else {
               # If an identical configuration is found, append the current subset number to its isAliveInSubset list
-              existing_subset <- newly_generated_configs$isAliveInSubset[identical_index]
-              newly_generated_configs$isAliveInSubset[identical_index] <- c(newly_generated_configs$isAliveInSubset[identical_index],existing_subset)
+              newly_generated_configs$isAliveInSubset[[identical_index[1]]] <- union(newly_generated_configs$isAliveInSubset[[identical_index[1]]], subset_number)
               }
             }
           }
@@ -1503,11 +1502,11 @@ irace_run <- function(scenario, parameters)
       elite_data_subset <- if (scenario$elitist && nrow(elite_configs_subset) > 0) {
         elite_configs_subset[[".ID."]] <- as.numeric(elite_configs_subset[[".ID."]])
         cat("Column names type:")
-        print(typeof(colnames(iraceResults$experiments[[subset_number]])))
+        print(typeof(colnames(iraceResults$experiments[[as.character(subset_number)]])))
         cat("Elite config IDs type:")
         print(typeof(elite_configs_subset[[".ID."]]))
         
-        invalid_ids <- elite_configs_subset[[".ID."]][!(elite_configs_subset[[".ID."]] %in% colnames(iraceResults$experiments[[subset_number]]))]
+        invalid_ids <- elite_configs_subset[[".ID."]][!(elite_configs_subset[[".ID."]] %in% colnames(iraceResults$experiments[[as.character(subset_number)]]))]
         if (length(invalid_ids) > 0) {
           cat("Invalid IDs:")
           print(invalid_ids)
@@ -1516,7 +1515,7 @@ irace_run <- function(scenario, parameters)
         }
         cat('as character')
         elite_configs_subset[[".ID."]] <- as.character(elite_configs_subset[[".ID."]])
-        invalid_ids <- elite_configs_subset[[".ID."]][!(elite_configs_subset[[".ID."]] %in% colnames(iraceResults$experiments[[subset_number]]))]
+        invalid_ids <- elite_configs_subset[[".ID."]][!(elite_configs_subset[[".ID."]] %in% colnames(iraceResults$experiments[[as.character(subset_number)]]))]
         if (length(invalid_ids) > 0) {
           cat("Invalid IDs:")
           print(invalid_ids)
@@ -1524,10 +1523,10 @@ irace_run <- function(scenario, parameters)
           cat("All IDs are valid.")
         }
           cat('iraceResults$experiments')
-          print(iraceResults$experiments[[subset_number]])
-          print(colnames(iraceResults$experiments[[subset_number]]))
+          print(iraceResults$experiments[[as.character(subset_number)]])
+          print(colnames(iraceResults$experiments[[as.character(subset_number)]]))
           print(elite_configs_subset[[".ID."]])
-          iraceResults$experiments[[subset_number]][, elite_configs_subset[[".ID."]], drop = FALSE]
+          iraceResults$experiments[[as.character(subset_number)]][, elite_configs_subset[[".ID."]], drop = FALSE]
       } else {
         NULL
       }
@@ -1552,13 +1551,14 @@ irace_run <- function(scenario, parameters)
 
     for (subset_number in unique(subsets$SubsetNumber)) {
       currentSubset <- subsets[subsets$SubsetNumber == subset_number,]
-      currentSubset$NextInstance <- nrow(iraceResults$experiments[[subset_number]]) + 1
+      currentSubset$NextInstance <- nrow(iraceResults$experiments[[as.character(subset_number)]]) + 1
       n <- nrow(.irace$instanceSubsetList[[as.character(subset_number)]])
       if (n - (currentSubset$NextInstance  - 1)
           < ceiling(currentSubset$remainingBudget / minSurvival)) {
-        .irace$instanceSubsetList <- generateInstancesForOneSubset(scenario,
-                                                      n = ceiling(remainingBudget / minSurvival),
-                                                      subset(instanceSubsets, SubsetNumber == subset_number), subset_number)
+        .irace$instanceSubsetList[[as.character(subset_number)]] <- generateInstancesForOneSubset(scenario,
+                                                      n = ceiling(currentSubset$remainingBudget / minSurvival),
+                                                      subset(instanceSubsets, SubsetNumber == subset_number),
+                                                      .irace$instanceSubsetList[[as.character(subset_number)]])
 
       }
     subsets[subsets$SubsetNumber == subset_number,] <- currentSubset
@@ -1594,7 +1594,7 @@ irace_run <- function(scenario, parameters)
     
     for (subset_number in unique(subsets$SubsetNumber)) {
       subsetResults <- raceResults$experiments[[as.character(subset_number)]]
-      iraceResults$experiments[[subset_number]] <- merge.matrix (iraceResults$experiments[[subset_number]],
+      iraceResults$experiments[[as.character(subset_number)]] <- merge.matrix (iraceResults$experiments[[as.character(subset_number)]],
                                               subsetResults)
     }
 
@@ -1632,13 +1632,10 @@ irace_run <- function(scenario, parameters)
 
     if (debugLevel >= 1) irace.note("Extracting elites\n")
 
-    # to ger current subsets RANK
+    # .RANK. holds one rank per subset, named by subset number.
     update_rank_for_subset <- function(rank_list, subset_number) {
-      if (length(rank_list) >= subset_number) {
-        return(rank_list[subset_number])
-      } else {
-        return(NA)
-      }
+      rank <- rank_list[as.character(subset_number)]
+      if (is.null(rank)) NA else unname(rank)
     }
 
     # FIXME: Since we only actually keep the alive ones, we don't need

@@ -301,6 +301,9 @@ elitrace.init.instances <- function(race.env, deterministic, max_instances, samp
 
 elitrace.init.instances.subsets <- function(race.env, subsets, deterministic, sampleInstances) {
   all_instances <- list()
+  # Number of new instances each subset sees in this race. It can be smaller than
+  # race.env$elitistNewInstances when a deterministic subset runs out of instances.
+  race.env$newInstancesPerSubset <- list()
   subsets.numbers <- subsets$SubsetNumber
   for (subset_num in subsets.numbers) {
     next_instance <- subsets[subsets$SubsetNumber == subset_num, "NextInstance"]
@@ -308,6 +311,7 @@ elitrace.init.instances.subsets <- function(race.env, subsets, deterministic, sa
 
     if (next_instance == 1) {
       subset_instances <- seq_len(max_instances)
+      race.env$newInstancesPerSubset[[as.character(subset_num)]] <- 0L
     } else {
       new_instances <- NULL
       last_new <- next_instance - 1L + race.env$elitistNewInstances
@@ -319,7 +323,6 @@ elitrace.init.instances.subsets <- function(race.env, subsets, deterministic, sa
             last_new <- max_instances
             new_instances <- next_instance:last_new
           }
-          race.env$elitistNewInstances <- length(new_instances)
         } else {
           new_instances <- next_instance:last_new
         }
@@ -334,6 +337,7 @@ elitrace.init.instances.subsets <- function(race.env, subsets, deterministic, sa
                         else seq_len(next_instance - 1L)
       
       subset_instances <- c(new_instances, past_instances, future_instances)
+      race.env$newInstancesPerSubset[[as.character(subset_num)]] <- length(new_instances)
     }
     
     all_instances[[as.character(subset_num)]] <- subset_instances
@@ -688,7 +692,7 @@ elitist_race <- function(maxExp = 0,
   experimentLog <- matrix(nrow = 0, ncol = 4,
                           dimnames = list(NULL, c("instance", "configuration", "time", "bound")))
 
-  alive_list <- vector("list", length = max(unlist(configurations$isAliveInSubset)))
+  alive_list <- list()
   rejected_list <- vector("list", length = max(unlist(configurations$isAliveInSubset)))
   # Iterate over each row of configurations
   for (i in seq_len(no.configurations)) {
@@ -697,7 +701,8 @@ elitist_race <- function(maxExp = 0,
     
     # For each subset, set the corresponding element in alive_list to TRUE
     for (subset in subsets) {
-      alive_list[[subset]] <- c(alive_list[[subset]], TRUE)
+      subset_key <- as.character(subset)
+      alive_list[[subset_key]] <- c(alive_list[[subset_key]], TRUE)
     }
     for (subset in seq_along(rejected_list)) {
     if (!(subset %in% subsets)) {
@@ -760,7 +765,10 @@ elitist_race <- function(maxExp = 0,
   # irace.assert(identical(sort(race.instances), seq_along(race.instances)))
   no.tasks <- sum(lengths(race.subsets_instances))
   unique_subset_numbers <- unique(subset.data$SubsetNumber)
-  subsetOrder <- rep(unique_subset_numbers, length.out = no.tasks)
+  # Round-robin over subsets, skipping a subset once its instances run out.
+  subset_lengths <- lengths(race.subsets_instances[as.character(unique_subset_numbers)])
+  subsetOrder <- unlist(lapply(seq_len(max(subset_lengths)),
+                               function(k) unique_subset_numbers[subset_lengths >= k]))
   cat('SUBSET ORDER: \n')
   print(subsetOrder)
 
@@ -775,7 +783,6 @@ elitist_race <- function(maxExp = 0,
   
   # Iterate over each subset
   for (subset_number in unique(subset.data$SubsetNumber)) {
-    subset.data[subset_number,]$experimentsUsed <- 0
     # Subset elite data for the current subset
     elite_data_subset <- elite.data[[as.character(subset_number)]]
     next_instance <- subset.data[subset.data$SubsetNumber == subset_number, "NextInstance"]
@@ -794,7 +801,7 @@ elitist_race <- function(maxExp = 0,
       irace.assert(all(colAnys(!is.na(elite_data_subset))))
       
       # Calculate elite.safe for the current subset
-      elite.safe <- race.env$elitistNewInstances + nrow(elite_data_subset)
+      elite.safe <- race.env$newInstancesPerSubset[[as.character(subset_number)]] + nrow(elite_data_subset)
       elite.safe_per_subset[[as.character(subset_number)]] <- elite.safe
       # Generate elite.instances.ID for the current subset
       elite.instances.ID <- as.character(race.subsets_instances[[as.character(subset_number)]][seq_len(elite.safe)])
@@ -981,11 +988,6 @@ elitist_race <- function(maxExp = 0,
   race.ranks <- vector("list", length(nSubsets))
   cat('NO TASKS')
   print(no.tasks)
-  test_res_list <- vector("list", length(nSubsets))
-  race_ranks_list <- vector("list", length(nSubsets))
-  test_alive_list <- vector("list", length(nSubsets))
-  test_dropped_list <- vector("list", length(nSubsets))
-  test_done_list <- vector("list", length(nSubsets))
   for (current.task in seq_len(no.tasks)) {
     # check ifare any subsets left
     terminated <- all(unique_subset_numbers %in% done_subsets)
@@ -998,8 +1000,9 @@ elitist_race <- function(maxExp = 0,
     if (currentSubset %in% done_subsets) next
     currentSubsetRow <- subset.data[subset.data$SubsetNumber == currentSubset, ]
     print(currentSubsetRow)
-    currentSubsetTask <- subset.data[currentSubset,]$currentSubsetTask
-    alive <- alive_list[[currentSubset]]
+    currentSubsetIdx <- which(subset.data$SubsetNumber == currentSubset)
+    currentSubsetTask <- currentSubsetRow$currentSubsetTask
+    alive <- alive_list[[as.character(currentSubset)]]
     which.alive <- which(alive)
     nbAlive     <- length(which.alive)
     which.exe   <- which.alive
@@ -1042,12 +1045,14 @@ elitist_race <- function(maxExp = 0,
         
         id_best <- currentSubsetConfigs[[".ID."]][best_list[[as.character(currentSubset)]]]
         print_task(".", result_list[[as.character(currentSubset)]][seq_len(currentSubsetTask), , drop = FALSE],
-                   race.subsets_instances[[currentSubset]][currentSubsetTask],
+                   race.subsets_instances[[as.character(currentSubset)]][currentSubsetTask],
                    currentSubsetTask, alive = alive,
                    id_best = id_best,
                    best = best_list[[as.character(currentSubset)]], currentSubsetRow$experimentsUsed, start_time = Sys.time(),
                    # FIXME: Why do we pass NA as bound? Why not pass the actual bound if any?
                    bound = NA, capping = capping)
+        # Move this subset to its next instance; otherwise it would retry this one forever.
+        subset.data[currentSubsetIdx, "currentSubsetTask"] <- currentSubsetTask + 1
         next
       }
     }
@@ -1121,12 +1126,23 @@ elitist_race <- function(maxExp = 0,
       #        break
       #      }
 
-    
-                                
+    # Never spend more than this subset's remaining budget (its share of
+    # maxExperiments). What is left cannot pay for the next instance, so the
+    # subset is out of budget.
+    if (scenario$maxTime == 0
+        && currentSubsetRow$experimentsUsed + length(which.exe) > currentSubsetRow$remainingBudget) {
+      break.msg <- paste0("experiments for next instance (",
+                          currentSubsetRow$experimentsUsed + length(which.exe),
+                          ") > remaining budget (", currentSubsetRow$remainingBudget, ")")
+      subset.data[subset.data$SubsetNumber == currentSubset, "remainingBudget"] <- currentSubsetRow$experimentsUsed
+      done_subsets <- c(done_subsets, currentSubset)
+      next
+    }
+
     if (nrow(result_list[[as.character(currentSubset)]] ) < currentSubsetTask) {
       result_list[[as.character(currentSubset)]]  <- rbind(result_list[[as.character(currentSubset)]] , rep(NA, ncol(result_list[[as.character(currentSubset)]] )))
       cat('rows are less: ')
-      rownames(result_list[[as.character(currentSubset)]]) <- race.subsets_instances[[currentSubset]][seq_nrow(result_list[[as.character(currentSubset)]])]
+      rownames(result_list[[as.character(currentSubset)]]) <- race.subsets_instances[[as.character(currentSubset)]][seq_nrow(result_list[[as.character(currentSubset)]])]
       if (capping) {
         experimentsTime <- rbind(experimentsTime, rep(NA, ncol(experimentsTime)))
         rownames(experimentsTime) <- race.instances[seq_nrow(experimentsTime)]
@@ -1224,7 +1240,7 @@ elitist_race <- function(maxExp = 0,
       final.bounds <- rep(scenario$boundMax, no.configurations)
     }
     
-    currentInstance <- race.subsets_instances[[currentSubset]][currentSubsetTask]
+    currentInstance <- race.subsets_instances[[as.character(currentSubset)]][currentSubsetTask]
     #filter configs from that subset only, which alive is for subset
     print(currentSubsetConfigs[which.alive, , drop = FALSE])
     output <- race.wrapper(configurations = currentSubsetConfigs[which.alive, , drop = FALSE],
@@ -1235,7 +1251,7 @@ elitist_race <- function(maxExp = 0,
                            bounds = final.bounds[which.alive],
                            which.alive = which.alive, which.exe = which.exe,
                            parameters = parameters, scenario = scenario)
-    subset.data[currentSubset,]$currentSubsetTask <- subset.data[currentSubset,]$currentSubsetTask + 1
+    subset.data[currentSubsetIdx, "currentSubsetTask"] <- subset.data[currentSubsetIdx, "currentSubsetTask"] + 1
     
     # Extract results
     vcost <- unlist(lapply(output, "[[", "cost"))
@@ -1280,7 +1296,7 @@ elitist_race <- function(maxExp = 0,
     #                  eval.after = {
     #                    print(mget(ls()))
     #                  })
-    subset.data[currentSubset,]$experimentsUsed <- subset.data[currentSubset,]$experimentsUsed + length(which.exe)
+    subset.data[currentSubsetIdx, "experimentsUsed"] <- subset.data[currentSubsetIdx, "experimentsUsed"] + length(which.exe)
     totalExperimentsUsed <- totalExperimentsUsed + length(which.exe)
     # We update the elites that have been executed.
     is.elite[[as.character(currentSubset)]] <- update.is.elite(is.elite[[as.character(currentSubset)]], which.elite.exe)
@@ -1300,7 +1316,7 @@ elitist_race <- function(maxExp = 0,
       which.alive <- which(alive)
       nbAlive     <- length(which.alive)
       # FIXME: Should we stop  if (nbAlive <= minSurvival) ???
-      elite.safe <- update.elite.safe(result_list[[currentSubset]], is.elite[[as.character(currentSubset)]])  
+      elite.safe <- update.elite.safe(result_list[[as.character(currentSubset)]], is.elite[[as.character(currentSubset)]])  
     }
     irace.assert(!anyNA(result_list[[as.character(currentSubset)]][seq_len(currentSubsetTask), alive, drop=FALSE]))
     irace.assert(!any(is.infinite(result_list[[as.character(currentSubset)]][, alive, drop=FALSE])))
@@ -1352,28 +1368,21 @@ elitist_race <- function(maxExp = 0,
         t.holm = aux.ttest(filteredResults, alive, which.alive, conf.level, adjust = "holm"),
         t.bonferroni = aux.ttest(filteredResults, alive, which.alive, conf.level, adjust = "bonferroni")
       )
-      
-      test_res_list[[as.character(currentSubset)]] <- test.res
-      race_ranks_list[[as.character(currentSubset)]] <- test.res$ranks
-      test_alive_list[[as.character(currentSubset)]] <- test.res$alive
-      print(test_alive_list[[as.character(currentSubset)]])
-      test_dropped_list[[as.character(currentSubset)]] <- sum(alive) > sum(test.res$alive)
-      test_done_list[[as.character(currentSubset)]] <- TRUE
-      prev.sum.alive <- sum(alive)
-      alive_list[[as.character(currentSubset)]] <- cap.alive & test_alive_list[[as.character(currentSubset)]]
-      print(alive_list[[as.character(currentSubset)]])
+
+      test.alive   <- test.res$alive
+      test.dropped <- sum(alive) > sum(test.alive)
+      test.done    <- TRUE
     }
     cat('cc2\n')
     # Merge the result of both eliminations.
-    # prev.sum.alive <- sum(alive)
-    # alive <- cap.alive & test.alive
-    # print
+    prev.sum.alive <- sum(alive)
+    alive <- cap.alive & test.alive
     
     # Handle elites when elimination is performed.  The elite configurations
     # can be removed only when they have no more previously-executed instances.
     print(is.elite[[as.character(currentSubset)]])
     print(elite.safe_per_subset)
-    irace.assert(!any(is.elite[[as.character(currentSubset)]] > 0) == (currentSubsetTask >= elite.safe_per_subset[currentSubset]))
+    irace.assert(!any(is.elite[[as.character(currentSubset)]] > 0) == (currentSubsetTask >= elite.safe_per_subset[[as.character(currentSubset)]]))
     if (!is.null(elite.data[[as.character(currentSubset)]]) && any(is.elite[[as.character(currentSubset)]] > 0)) {
       irace.assert (length(alive) == length(is.elite[[as.character(currentSubset)]]))
       alive <- alive | (is.elite[[as.character(currentSubset)]] > 0)
@@ -1420,6 +1429,7 @@ elitist_race <- function(maxExp = 0,
 
     prev.alive  <- which.alive
     which.alive <- which(alive)
+    alive_list[[as.character(currentSubset)]] <- alive
     # Remove the ranks of those that are not alive anymore
     race.ranks[[as.character(currentSubset)]] <- race.ranks[[as.character(currentSubset)]][which.alive]
     irace.assert(length(race.ranks[[as.character(currentSubset)]]) == sum(alive))
@@ -1427,12 +1437,12 @@ elitist_race <- function(maxExp = 0,
     print_task(res.symb, result_list[[as.character(currentSubset)]][seq_len(currentSubsetTask), , drop = FALSE],
                 currentInstance,
                currentSubsetTask, alive = alive,
-               id_best = id_best, best = best_list[[as.character(currentSubset)]], subset.data[currentSubset,]$experimentsUsed, start_time = start_time, 
+               id_best = id_best, best = best_list[[as.character(currentSubset)]], subset.data[currentSubsetIdx, "experimentsUsed"], start_time = start_time, 
                bound = elite.bound, capping)
     cat('cc6\n')
     if (elitist) {
       # Compute number of statistical tests without eliminations.
-      irace.assert(!any(is.elite[[as.character(currentSubset)]] > 0) == (currentSubsetTask >= elite.safe_per_subset[currentSubset]))
+      irace.assert(!any(is.elite[[as.character(currentSubset)]] > 0) == (currentSubsetTask >= elite.safe_per_subset[[as.character(currentSubset)]]))
       if (!any(is.elite[[as.character(currentSubset)]] > 0)
           && currentSubsetTask > first.test && (currentSubsetTask %% each.test) == 0) {
         if (length(which.alive) == length(prev.alive)) {
@@ -1478,7 +1488,11 @@ elitist_race <- function(maxExp = 0,
     Results <- result_list[[as.character(subset_number)]]
     Results <- Results[rowAnys(!is.na(Results)), , drop = FALSE]
     result_list[[as.character(subset_number)]] <- Results
-    alive <- alive_list[[subset_number]]
+    alive <- alive_list[[as.character(subset_number)]]
+    # A configuration that never ran (its subset ran out of budget first) cannot
+    # be ranked or kept as an elite.
+    alive <- alive & colSums2(!is.na(Results)) > 0
+    which.alive <- which(alive)
     rejected <- rejected_list[[subset_number]]
     race.ranks[[as.character(subset_number)]] <- overall_ranks(Results[, alive, drop = FALSE], test = stat.test)
     if (!scenario$quiet) {
@@ -1524,7 +1538,9 @@ elitist_race <- function(maxExp = 0,
       for (i in seq_len(nrow(configs))) {
         config_index <- which(rownames(configurations) == rownames(configs)[i])
         current_rank <- race.ranks[[as.character(subset_number)]][i]
-        configurations$.RANK.[[config_index]] <- c(configurations$.RANK.[[config_index]], current_rank)
+        # Rank vectors are named by subset number, so irace() can look them up by name.
+        configurations$.RANK.[[config_index]] <- c(configurations$.RANK.[[config_index]],
+                                                   setNames(current_rank, subset_number))
       }
     }
   
@@ -1550,6 +1566,7 @@ elitist_race <- function(maxExp = 0,
        experimentsUsed = totalExperimentsUsed,
        nbAlive = alivePerSubset,
        configurations = configurations,
-       subsets = subset.data,
+       # currentSubsetTask is only used inside the race.
+       subsets = subset.data[, setdiff(colnames(subset.data), "currentSubsetTask"), drop = FALSE],
        rejectedIDs = rejected_ids_by_subset)
 }
